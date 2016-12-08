@@ -51,3 +51,10 @@ gobench: codis-deps
 
 docker:
 	docker build --force-rm -t codis-image .
+
+.PHONY: hack
+hack: IMG_OS := debian:jessie
+hack: IMG_NS := tangfeixiong
+hack:
+	hack/hack.sh --image-os=$(IMG_OS) $(IMG_NS)
+        

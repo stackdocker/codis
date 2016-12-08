@@ -1,0 +1,148 @@
+FROM debian:jessie
+MAINTAINER tangfeixiong <tangfx128@gmail.com>
+# Inspired by: [docker jessie buildpack-deps](https://github.com/docker-library/buildpack-deps)
+
+# debian_mirror: For example, 'http://ftp2.cn.debian.org/debian/', 'http://ftp.cn.debian.org/debian/', 'http://mirrors.aliyun.com/debian/', default is 'http://httpredir.debian.org/debian'.
+ARG debian_mirror=http://ftp2.cn.debian.org/debian/
+# golang_dist_server: For example, Google Golang dist server `https://storage.googleapis.com`. or mirroring 'http://www.golangtc.com/static/go/1.6.2/go1.6.2.linux-amd64.tar.gz'.
+ARG golang_dist_server
+# golang_dist_path: Google Golang dist path, or local dir (default is `<build context>/hack`).
+ARG golang_dist_path
+# golang_pkg: Golang distribution, default is `go1.6.2.linux-amd64.tar.gz`.
+ARG golang_pkg
+# redis_version:  '2.8.21' or '3.2.4', default is '3.2.4'.
+ARG redis_version
+
+ADD / /tmp/build/
+
+RUN set -x \
+    && temp_dir=/tmp/build \
+    ### $ docker run -t --rm debian:jessie cat /etc/apt/sources.list
+    ### deb http://deb.debian.org/debian jessie main
+    ### deb http://deb.debian.org/debian jessie-updates main
+    ### deb http://security.debian.org jessie/updates main
+    ### $ docker run -t --rm debian:jessie sed "s%http://deb.debian.org/debian%http://httpredir.debian.org/debian%g;s%^\(deb http://security\.debian\.org.*\)$%# \1%g" /etc/apt/sources.list
+    && jessie_repo=${debian_mirror:-'http://httpredir.debian.org/debian'} \
+    && sed -i "s%http://deb.debian.org/debian%$jessie_repo%g;s%^\(deb http://security\.debian\.org.*\)$%# \1%g" /etc/apt/sources.list \
+    && curlDeps=" \
+        ca-certificates \
+        curl \
+        ### wget 
+    " \
+    && scmDeps=" \
+        ### bzr 
+        git \
+        ### mercurial
+        ### openssh-client
+        ### subversion
+        ### procps
+    " \
+    && buildDeps=" \
+        autoconf \
+        automake \
+        ### bzip2
+        ### file
+        ### g++
+        gcc \
+        ### imagemagick
+        ### libbz2-dev
+        libc6-dev \
+        ### libcurl4-openssl-dev
+        ### libdb-dev 
+        libevent-dev \
+        libffi-dev \
+        ### libgdbm-dev 
+        ### libgeoip-dev
+        ### libglib2.0-dev
+        ### libjpeg-dev
+        ### libkrb5-dev
+        ### liblzma-dev
+        ### libmagickcore-dev
+        ### libmagickwand-dev
+        ### libmysqlclient-dev
+        ### libncurses-dev
+        ### libpng-dev
+        ### libpq-dev
+        ### libreadline-dev
+        ### libsqlite3-dev
+        ### libssl-dev
+        libtool \
+        ### libwebp-dev
+        ### libxml2-dev
+        ### libxslt-dev
+        ### libyaml-dev
+        make \
+        ### patch
+        ### xz-utils
+        ### zlib1g-dev
+    " \
+    && compressDeps=" \
+        bzip2 \
+        unzip \
+        xz-utils \
+    " \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends $curlDeps $scmDeps $buildDeps \
+    && rm -rf /var/lib/apt/lists/* \
+# Golang
+    && install_golang_pkg=$temp_dir/${golang_dist_path:-'hack'}/${golang_pkg:-'go1.6.2.linux-amd64.tar.gz'} \
+    && if [ -f $install_golang_pkg ]; then \
+	tar -C /opt -zxf $install_golang_pkg; \
+        rm $install_golang_pkg; \
+    else \
+        install_golang_pkg=${golang_dist_server:-'https://storage.googleapis.com'}/${golang_dist_path:-golang}/${golang_pkg:-'go1.6.2.linux-amd64.tar.gz'}; \
+        protocol_pattern="(https?|ftp\)://.*"; \
+	[[ $install_golang_pkg =~ $protocol_pattern ]] \
+            && curl -jkSL ${install_golang_pkg//%/%25} \
+                | tar -C /opt -zx \
+            || curl -jkSL https://storage.googleapis.com/golang/go1.6.2.linux-amd64.tar.gz \
+		| tar -C /opt -zx; \
+    fi \
+    && export GOROOT=/opt/go \
+    && go_path=$(mktemp -d) \
+    && export GOPATH=$go_path \
+    && export GOBIN=/opt/bin \
+    && export PATH=$PATH:/opt/go/bin:/opt/bin \
+# codis
+    && mkdir -p $go_path/src/github.com/CodisLabs/codis/bin \
+    && { \
+        redis_basename=${redis_version:-3.2.4}; \
+        redis_basename=redis-${redis_basename##*-}; \
+	[ -d $temp_dir/extern/$redis_basename ] \
+        	&& mv $temp_dir/* $go_path/src/github.com/CodisLabs/codis/ \
+		|| git clone -b release3.1 --depth 1 https://github.com/CodisLabs/codis $go_path/src/github.com/CodisLabs/codis; \
+    } \
+    && cd $go_path/src/github.com/CodisLabs/codis \
+    && make -j$(nproc)  -C extern/$redis_basename/ \
+    && cp extern/$redis_basename/src/redis-server extern/$redis_basename/src/redis-benchmark extern/$redis_basename/src/redis-cli extern/$redis_basename/src/redis-sentinel extern/$redis_basename/src/redis-check-rdb extern/$redis_basename/src/redis-check-aof bin/ \
+    && cp bin/redis-server bin/codis-server \
+    && { \
+	[ -f extern/$redis_basename/src/redis-trib.rb ] \
+	    && cp extern/$redis_basename/src/redis-trib.rb bin; \
+    } \
+    && rm -rf extern/$redis_basename/ \
+    && make -C vendor/github.com/spinlock/jemalloc-go/ \
+    && go build -i -o bin/codis-dashboard -v ./cmd/dashboard \
+    && go build -i -o bin/codis-proxy -v ./cmd/proxy \
+    && go build -i -o bin/codis-admin -v ./cmd/admin \
+    && go build -i -o bin/codis-ha -v ./cmd/ha \
+    && go build -i -o bin/codis-fe -v ./cmd/fe \
+    && rm -rf bin/assets \
+    && mv cmd/fe/assets bin/ \
+    && mv bin /opt/bin \
+    ### ln -s /opt/bin/redis-server /opt/bin/codis-server
+    && rm -rf $GOROOT \
+    && cd / \
+    && rm -rf $go_path \
+# finally
+    && apt-get purge -y --auto-remove curl $scmDeps $buildDeps \
+    && { \
+	[ -d $temp_dir ] \
+	    && rm -rf $temp_dir; \
+    }
+    
+ENV PATH $PATH:/opt/bin
+
+EXPOSE 6379 26379 18080 19000 11080 8080
+
+CMD ["/opt/bin/redis-server"]
